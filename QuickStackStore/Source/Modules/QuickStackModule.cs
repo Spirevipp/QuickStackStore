@@ -1,6 +1,7 @@
 ﻿using HarmonyLib;
 using System.Collections.Generic;
 using System.Linq;
+using QuickStackStore.IContainers;
 using static ItemDrop;
 using static QuickStackStore.QSSConfig;
 
@@ -80,7 +81,7 @@ namespace QuickStackStore
                 return;
             }
 
-            List<Container> containers = ContainerFinder.FindContainersInRange(player.transform.position, QuickStackConfig.QuickStackToNearbyRange.Value);
+            List<ContainerWrapper> containers = ContainerFinder.FindContainersAndDrawersInRange(player.transform.position, QuickStackConfig.QuickStackToNearbyRange.Value);
 
             var sw = new System.Diagnostics.Stopwatch();
             sw.Start();
@@ -165,33 +166,91 @@ namespace QuickStackStore
             return movedStackCount;
         }
 
-        private static int QuickStackIntoMultipleContainers(List<ItemData> trophies, List<ItemData> nonTrophies, Player player, List<Container> containers)
+        private static int QuickStackIntoThisDrawer(List<ItemData> trophies, List<ItemData> nonTrophies, Inventory playerInventory, kgDrawer drawer, bool callPlayerInvChanged = true)
+        {
+            int movedStackCount = 0;
+            Helper.Log($"Starting quick stack: inventory count: {playerInventory.m_inventory.Count}, container count: {drawer.GetAmount()}", DebugSeverity.Everything);
+
+            if (QuickStackConfig.QuickStackTrophiesIntoSameContainer.Value && trophies?.Count > 0)
+            {
+                for (int j = trophies.Count - 1; j >= 0; j--)
+                {
+                    var playerItem = trophies[j];
+
+                    // itemData.m_dropPrefab.name
+                    if (drawer.ContainsItem(playerItem.m_dropPrefab.name))
+                    {
+                        drawer.AddItem(playerItem.m_dropPrefab.name, playerItem.m_stack);
+                        playerInventory.RemoveItem(playerItem);
+                        trophies.RemoveAt(j);
+                        movedStackCount++;
+                    }
+                }
+            }
+
+            if (nonTrophies?.Count > 0)
+            {
+                for (int j = nonTrophies.Count - 1; j >= 0; j--)
+                {
+                    var playerItem = nonTrophies[j];
+
+                    if (drawer.ContainsItem(playerItem.m_dropPrefab.name))
+                    {
+                        drawer.AddItem(playerItem.m_dropPrefab.name, playerItem.m_stack);
+                        playerInventory.RemoveItem(playerItem);
+                        nonTrophies.RemoveAt(j);
+                        movedStackCount++;
+                    }
+                }
+            }
+            
+            Helper.Log($"Finished quick stack: Removed {movedStackCount} stacks (remember that these merge with non full stacks in the container first). Inventory count: {playerInventory.m_inventory.Count}, container count: {drawer.GetAmount()}", DebugSeverity.Everything);
+
+            if (callPlayerInvChanged)
+            {
+                playerInventory.Changed();
+            }
+
+            return movedStackCount;
+        }
+
+        private static int QuickStackIntoMultipleContainers(List<ItemData> trophies, List<ItemData> nonTrophies, Player player, List<ContainerWrapper> containers)
         {
             int movedStackCount = 0;
 
             bool isSinglePlayer = AreaStackRestockHelper.IsTrueSingleplayer();
 
-            foreach (Container container in containers)
+            foreach (ContainerWrapper wrappedContainer in containers)
             {
-                if (!AreaStackRestockHelper.ShouldAffectNonOwnerContainer(container, player.GetPlayerID(), isSinglePlayer))
+                switch (wrappedContainer)
                 {
-                    continue;
+                    case VanillaContainer vc:
+                        var container = vc.Container;
+                        if (!AreaStackRestockHelper.ShouldAffectNonOwnerContainer(container, player.GetPlayerID(), isSinglePlayer))
+                        {
+                            continue;
+                        }
+
+                        if (CompatibilitySupport.HasPlugin(CompatibilitySupport.multiUserChest))
+                        {
+                            movedStackCount += QuickStackIntoThisContainer(trophies, nonTrophies, player.m_inventory, container.m_inventory, false);
+                        }
+                        else
+                        {
+                            container.m_nview.ClaimOwnership();
+
+                            AreaStackRestockHelper.SetNonMUCContainerInUse(container, true);
+
+                            movedStackCount += QuickStackIntoThisContainer(trophies, nonTrophies, player.m_inventory, container.m_inventory, false);
+
+                            AreaStackRestockHelper.SetNonMUCContainerInUse(container, false);
+                        }
+                        break;
+                    case kgDrawer drawer:
+                        movedStackCount += QuickStackIntoThisDrawer(trophies, nonTrophies, player.m_inventory, drawer, false);
+                        break;
                 }
-
-                if (CompatibilitySupport.HasPlugin(CompatibilitySupport.multiUserChest))
-                {
-                    movedStackCount += QuickStackIntoThisContainer(trophies, nonTrophies, player.m_inventory, container.m_inventory, false);
-                }
-                else
-                {
-                    container.m_nview.ClaimOwnership();
-
-                    AreaStackRestockHelper.SetNonMUCContainerInUse(container, true);
-
-                    movedStackCount += QuickStackIntoThisContainer(trophies, nonTrophies, player.m_inventory, container.m_inventory, false);
-
-                    AreaStackRestockHelper.SetNonMUCContainerInUse(container, false);
-                }
+                
             }
 
             player.m_inventory.Changed();
